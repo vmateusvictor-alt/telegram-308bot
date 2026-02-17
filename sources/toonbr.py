@@ -1,50 +1,47 @@
 import httpx
+import asyncio
 
 class ToonBrSource:
     def __init__(self):
-        self.base_url = "https://beta.toonbr.com"
         self.api_url = "https://api.toonbr.com"
         self.cdn_url = "https://cdn2.toonbr.com"
+        self.client = httpx.AsyncClient(timeout=30)
 
-    # ================= SEARCH =================
     async def search(self, query: str):
-        url = f"{self.api_url}/api/manga?page=1&limit=50&q={query}"
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, timeout=30)
-            data = resp.json()
-            results = []
-            for item in data.get("data", []):
-                results.append({
-                    "title": item.get("name"),
-                    "url": item.get("slug"),
-                    "thumbnail": item.get("poster", {}).get("default_url")
-                })
-            return results
+        url = f"{self.api_url}/api/manga?page=1&limit=20&search={query}"
+        resp = await self.client.get(url)
+        resp.raise_for_status()
+        data = resp.json().get("data", [])
+        return [
+            {
+                "title": item.get("title"),
+                "url": item.get("slug"),
+                "manga_title": item.get("title")
+            } for item in data
+        ]
 
-    # ================= CHAPTERS =================
     async def chapters(self, manga_slug: str):
         url = f"{self.api_url}/api/manga/{manga_slug}"
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, timeout=30)
-            data = resp.json()
-            manga_name = data.get("name") or "Manga"
-            chapters = []
-            for ch in data.get("chapters", []):
-                chapters.append({
-                    "url": ch.get("slug"),
-                    "chapter_number": ch.get("number"),
-                    "name": f"Cap {ch.get('number')}",
-                    "manga_title": manga_name
-                })
-            return sorted(chapters, key=lambda x: float(x["chapter_number"]))
+        resp = await self.client.get(url)
+        if resp.status_code != 200:
+            return []
+        manga = resp.json()
+        chapters = manga.get("chapters", [])
+        return [
+            {
+                "url": ch.get("id"),
+                "chapter_number": ch.get("chapter_number"),
+                "name": f"Cap {ch.get('chapter_number')}",
+                "manga_title": manga.get("title")
+            } for ch in chapters
+        ]
 
-    # ================= PAGES =================
-    async def pages(self, chapter_slug: str):
-        url = f"{self.api_url}/api/chapter/{chapter_slug}"
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(url, timeout=30)
-            data = resp.json()
-            pages = []
-            for img in data.get("pages", []):
-                pages.append(f"{self.cdn_url}{img.get('image')}" if img.get("image") else None)
-            return [p for p in pages if p]
+    async def pages(self, chapter_id: str):
+        url = f"{self.api_url}/api/chapter/{chapter_id}"
+        resp = await self.client.get(url)
+        if resp.status_code != 200:
+            return []
+        chapter = resp.json()
+        return [
+            self.cdn_url + img["imageUrl"] for img in chapter.get("pages", []) if img.get("imageUrl")
+    ]
