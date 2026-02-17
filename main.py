@@ -20,15 +20,15 @@ CHAPTERS_PER_PAGE = 10
 
 # ================= ERROR HANDLER =================
 async def error_handler(update, context):
-    print("========= ERRO GLOBAL =========")
+    print("========== ERRO GLOBAL ==========")
     traceback.print_exception(None, context.error, context.error.__traceback__)
-    print("================================")
+    print("==================================")
 
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "📚 ToonBr Bot Online!\nUse:\n/buscar nome_do_manga"
+        "📚 ToonBr Bot Online!\n\nUse:\n/buscar nome_do_manga"
     )
 
 
@@ -38,7 +38,6 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await update.message.reply_text("Use: /buscar nome")
 
     query = " ".join(context.args)
-
     results = await source.search(query)
 
     if not results:
@@ -69,6 +68,10 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chapters = await source.chapters(slug)
 
+    # salva na sessão
+    context.user_data["chapters"] = chapters
+    context.user_data["slug"] = slug
+
     total = len(chapters)
     start = page * CHAPTERS_PER_PAGE
     end = start + CHAPTERS_PER_PAGE
@@ -76,12 +79,12 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     buttons = []
 
-    for ch in subset:
+    for i, ch in enumerate(subset, start=start):
         chap_num = ch.get("chapter_number") or "?"
         buttons.append([
             InlineKeyboardButton(
                 f"Cap {chap_num}",
-                callback_data=f"c|{slug}|{ch['url']}"
+                callback_data=f"c|{i}"
             )
         ])
 
@@ -108,14 +111,18 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    _, slug, chapter_id = query.data.split("|")
+    _, index_str = query.data.split("|")
+    index = int(index_str)
+
+    context.user_data["selected_index"] = index
 
     buttons = [
         [
-            InlineKeyboardButton(
-                "📥 Baixar este",
-                callback_data=f"d|{slug}|{chapter_id}|s"
-            )
+            InlineKeyboardButton("📥 Baixar este", callback_data="d|single"),
+            InlineKeyboardButton("📥 Baixar deste até o fim", callback_data="d|from")
+        ],
+        [
+            InlineKeyboardButton("📥 Baixar até aqui", callback_data="d|to")
         ]
     ]
 
@@ -130,39 +137,50 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    _, slug, chapter_id, mode = query.data.split("|")
+    _, mode = query.data.split("|")
 
-    status = await query.message.reply_text("📦 Gerando CBZ...")
+    chapters = context.user_data.get("chapters")
+    index = context.user_data.get("selected_index")
 
-    chapters = await source.chapters(slug)
-
-    chapter = next(
-        (c for c in chapters if str(c["url"]) == chapter_id),
-        None
-    )
-
-    if not chapter:
-        await status.edit_text("❌ Capítulo não encontrado.")
+    if chapters is None or index is None:
+        await query.message.reply_text("❌ Sessão expirada. Busque novamente.")
         return
 
-    imgs = await source.pages(chapter_id)
+    if mode == "single":
+        selected = [chapters[index]]
+    elif mode == "from":
+        selected = chapters[index:]
+    elif mode == "to":
+        selected = chapters[:index+1]
+    else:
+        selected = [chapters[index]]
 
-    if not imgs:
-        await status.edit_text("❌ Capítulo vazio.")
-        return
-
-    cbz_path, cbz_name = await create_cbz(
-        imgs,
-        chapter["manga_title"],
-        f"Cap {chapter.get('chapter_number')}"
+    status = await query.message.reply_text(
+        f"📦 Gerando {len(selected)} capítulo(s)..."
     )
 
-    await query.message.reply_document(
-        document=open(cbz_path, "rb"),
-        filename=cbz_name
-    )
+    for chapter in selected:
+        imgs = await source.pages(chapter["url"])
 
-    os.remove(cbz_path)
+        if not imgs:
+            await query.message.reply_text(
+                f"❌ Cap {chapter.get('chapter_number')} vazio ou bloqueado."
+            )
+            continue
+
+        cbz_path, cbz_name = await create_cbz(
+            imgs,
+            chapter["manga_title"],
+            f"Cap {chapter.get('chapter_number')}"
+        )
+
+        await query.message.reply_document(
+            document=open(cbz_path, "rb"),
+            filename=cbz_name
+        )
+
+        os.remove(cbz_path)
+
     await status.delete()
 
 
