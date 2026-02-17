@@ -1,21 +1,13 @@
 import os
 import logging
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
-from telegram.ext import (
-    ApplicationBuilder,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    filters,
-    ContextTypes,
-)
+from telegram.ext import ApplicationBuilder, CommandHandler, CallbackQueryHandler, ContextTypes
 from utils.loader import get_all_sources
 from utils.cbz import create_cbz
 
 logging.basicConfig(level=logging.INFO)
 
 CHAPTERS_PER_PAGE = 10
-WAITING_FOR_CAP_INPUT = {}  # {chat_id: {"source":..., "chapter_id":..., "type": "to_here"}}
 
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -27,6 +19,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Use: /buscar nome")
+
     query = " ".join(context.args)
     sources = get_all_sources()
     buttons = []
@@ -43,7 +36,8 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         callback_data=f"manga|{source_name}|{url}|0"
                     )
                 ])
-        except Exception:
+        except Exception as e:
+            print(f"Erro ao buscar em {source_name}: {e}")
             continue
 
     if not buttons:
@@ -58,6 +52,7 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
+
     _, source_name, manga_url, page_str = query.data.split("|")
     page = int(page_str)
     source = get_all_sources()[source_name]
@@ -74,10 +69,11 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append([
             InlineKeyboardButton(
                 f"Cap {chap_num}",
-                callback_data=f"chapter|{source_name}|{ch.get('url')}|{chap_num}"
+                callback_data=f"chapter|{source_name}|{ch.get('url')}"
             )
         ])
 
+    # Navegação
     nav = []
     if start > 0:
         nav.append(
@@ -95,17 +91,24 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
-# ================= CHAPTER (opções de download) =================
+# ================= CHAPTER (opções) =================
 async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    _, source_name, chapter_id, chap_num = query.data.split("|")
+
+    _, source_name, chapter_id = query.data.split("|")
     source = get_all_sources()[source_name]
+
+    # Pega info do capítulo
+    chapters = await source.chapters(chapter_id)
+    info = next((c for c in chapters if c.get("url") == chapter_id or c.get("id") == chapter_id), {})
+    chap_num = info.get("chapter_number") or info.get("name")
+    manga_title = info.get("manga_title","Manga")
 
     buttons = [
         [InlineKeyboardButton("📥 Baixar este", callback_data=f"download|{source_name}|{chapter_id}|single")],
-        [InlineKeyboardButton("📥 Baixar todos a partir deste", callback_data=f"download|{source_name}|{chapter_id}|from_here")],
-        [InlineKeyboardButton("📥 Baixar até cap X", callback_data=f"download|{source_name}|{chapter_id}|to_here")]
+        [InlineKeyboardButton("📥 Baixar deste até o fim", callback_data=f"download|{source_name}|{chapter_id}|from_here")],
+        [InlineKeyboardButton("📥 Baixar até Cap X", callback_data=f"download|{source_name}|{chapter_id}|to_here")]
     ]
 
     await query.edit_message_text(
@@ -117,28 +120,28 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-    chat_id = query.message.chat.id
+
     _, source_name, chapter_id, mode = query.data.split("|")
     source = get_all_sources()[source_name]
 
-    if mode == "to_here":
-        # solicitar número do capítulo
-        WAITING_FOR_CAP_INPUT[chat_id] = {
-            "source": source_name,
-            "chapter_id": chapter_id,
-            "type": "to_here",
-            "message_id": query.message.message_id
-        }
-        await query.message.reply_text("Digite o número do capítulo até onde deseja baixar:")
-        return
-
     chapters = await source.chapters(chapter_id)
-    index = next((i for i,c in enumerate(chapters) if c.get('url')==chapter_id or c.get('id')==chapter_id), 0)
+    index = next((i for i,c in enumerate(chapters) if c.get('url')==chapter_id or c.get("id")==chapter_id), 0)
 
     if mode == "single":
         sel = [chapters[index]]
     elif mode == "from_here":
         sel = chapters[index:]
+    elif mode == "to_here":
+        # Pergunta o cap de destino
+        await query.message.reply_text("Digite o número do Cap até onde deseja baixar:")
+
+        # Salva contexto para receber o próximo input do usuário
+        context.user_data["to_here"] = {
+            "source_name": source_name,
+            "chapter_index": index,
+            "chapters": chapters
+        }
+        return
     else:
         sel = [chapters[index]]
 
@@ -164,45 +167,41 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await status.delete()
 
-# ================= RECEBER NÚMERO DO CAP =================
-async def cap_number_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    chat_id = update.message.chat.id
-    if chat_id not in WAITING_FOR_CAP_INPUT:
-        return
-    data = WAITING_FOR_CAP_INPUT.pop(chat_id)
-    try:
-        num = int(update.message.text.strip())
-    except:
-        await update.message.reply_text("Número inválido.")
+# ================= HANDLE USER INPUT PARA "TO HERE" =================
+async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if "to_here" not in context.user_data:
         return
 
-    source_name = data["source"]
-    chapter_id = data["chapter_id"]
-    msg_id = data["message_id"]
-    source = get_all_sources()[source_name]
+    text = update.message.text.strip()
+    if not text.isdigit():
+        return await update.message.reply_text("Digite apenas números válidos!")
 
-    chapters = await source.chapters(chapter_id)
-    index = next((i for i,c in enumerate(chapters) if c.get('url')==chapter_id or c.get('id')==chapter_id), 0)
+    dest_cap = int(text)
+    data = context.user_data.pop("to_here")
+    chapters = data["chapters"]
+    index = data["chapter_index"]
 
-    # pegar capítulos até o número digitado
+    # Seleciona até o cap digitado
     sel = []
-    for c in chapters:
-        chap_num = c.get("chapter_number") or c.get("name")
+    for c in chapters[index:]:
+        num = c.get("chapter_number") or c.get("name")
         sel.append(c)
-        if chap_num == num:
+        if num == dest_cap:
             break
 
     status = await update.message.reply_text(f"📦 Gerando {len(sel)} CBZ(s)...")
+    source_name = data["source_name"]
+    source = get_all_sources()[source_name]
 
     for c in sel:
         cid = c.get("url") or c.get("id")
-        chap_num = c.get("chapter_number") or c.get("name")
-        name = f"Cap {chap_num}"
+        num = c.get("chapter_number") or c.get("name")
+        name = f"Cap {num}"
         manga_title = c.get("manga_title","Manga")
 
         imgs = await source.pages(cid)
         if not imgs:
-            await update.message.reply_text(f"❌ Cap {chap_num} vazio")
+            await update.message.reply_text(f"❌ Cap {num} vazio")
             continue
 
         cbz_path, cbz_name = await create_cbz(imgs, manga_title, name)
@@ -217,13 +216,17 @@ async def cap_number_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
 # ================= MAIN =================
 def main():
     app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
+
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CallbackQueryHandler(manga_callback, pattern="^manga"))
     app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^chapter"))
     app.add_handler(CallbackQueryHandler(download_callback, pattern="^download"))
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, cap_number_handler))
+    app.add_handler(CommandHandler("cancel", lambda u,c: u.message.reply_text("Operação cancelada.")))
+    app.add_handler(MessageHandler(filters=None, callback=handle_text))  # captura input do usuário para "to_here"
+
     app.run_polling(drop_pending_updates=True)
+
 
 if __name__ == "__main__":
     main()
