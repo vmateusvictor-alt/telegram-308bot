@@ -99,11 +99,9 @@ async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    # recebemos manga_url e chapter_id
     _, source_name, manga_url, chapter_id = query.data.split("|")
     source = get_all_sources()[source_name]
 
-    # lista completa de capítulos do mangá
     chapters = await source.chapters(manga_url)
     index = next((i for i,c in enumerate(chapters) if str(c.get("url")) == chapter_id or str(c.get("id")) == chapter_id), 0)
     chapter = chapters[index]
@@ -138,11 +136,12 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chapters = await source.chapters(manga_url)
     index = next((i for i,c in enumerate(chapters) if str(c.get("url"))==chapter_id or str(c.get("id"))==chapter_id), 0)
 
-    if mode=="single":
+    # seleciona capítulos de acordo com a opção
+    if mode == "single":
         sel = [chapters[index]]
-    elif mode=="from_here":
+    elif mode == "from_here":
         sel = chapters[index:]
-    elif mode=="to_here":
+    elif mode == "to_here":
         sel = chapters[:index+1]
     else:
         sel = [chapters[index]]
