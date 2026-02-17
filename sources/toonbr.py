@@ -1,110 +1,75 @@
 import httpx
-from datetime import datetime
 
-API_URL = "https://api.toonbr.com"
+API_URL = "https://api.toonbr.com/api"
 CDN_URL = "https://cdn2.toonbr.com"
-
-PAGE_LIMIT = 150
 
 
 class ToonBrSource:
 
-    def __init__(self, email=None, password=None):
-        self.email = email
-        self.password = password
-        self.token = None
+    def __init__(self):
         self.client = httpx.AsyncClient(timeout=30)
-
-    # ================= LOGIN =================
-
-    async def login(self):
-        if not self.email or not self.password:
-            return None
-
-        payload = {
-            "email": self.email,
-            "password": self.password
-        }
-
-        r = await self.client.post(f"{API_URL}/api/auth/login", json=payload)
-
-        if r.status_code == 200:
-            self.token = r.json().get("token")
-            return self.token
-        else:
-            return None
-
-    def _headers(self):
-        headers = {}
-        if self.token:
-            headers["Cookie"] = f"token={self.token}"
-        return headers
-
-    # ================= POPULAR =================
-
-    async def popular(self):
-        r = await self.client.get(
-            f"{API_URL}/api/manga/popular?limit={PAGE_LIMIT}",
-            headers=self._headers()
-        )
-        return r.json()
-
-    # ================= LATEST =================
-
-    async def latest(self):
-        r = await self.client.get(
-            f"{API_URL}/api/manga/latest?limit={PAGE_LIMIT}",
-            headers=self._headers()
-        )
-        return r.json()
 
     # ================= SEARCH =================
 
-    async def search(self, query="", page=1, category_id=None):
-        url = f"{API_URL}/api/manga?page={page}&limit={PAGE_LIMIT}"
+    async def search(self, query):
+        try:
+            r = await self.client.get(
+                f"{API_URL}/manga",
+                params={"search": query}
+            )
 
-        if query:
-            url += f"&search={query}"
+            data = r.json()
+            mangas = []
 
-        if category_id:
-            url += f"&categoryId={category_id}"
+            for m in data.get("data", []):
+                mangas.append({
+                    "title": m.get("title"),
+                    "slug": m.get("slug")
+                })
 
-        r = await self.client.get(url, headers=self._headers())
-        return r.json()
+            return mangas
 
-    # ================= DETAILS =================
-
-    async def details(self, slug):
-        r = await self.client.get(
-            f"{API_URL}/api/manga/{slug}",
-            headers=self._headers()
-        )
-        return r.json()
+        except Exception:
+            return []
 
     # ================= CHAPTERS =================
 
-    async def chapters(self, slug):
-        data = await self.details(slug)
-        chapters = data.get("chapters", [])
+    async def chapters(self, manga_url):
+        try:
+            slug = manga_url.rstrip("/").split("/")[-1]
 
-        # Ordenar igual extensão
-        chapters.sort(key=lambda x: x.get("chapter_number", 0), reverse=True)
+            r = await self.client.get(f"{API_URL}/manga/{slug}")
+            data = r.json()
 
-        return chapters
+            chapters = []
+
+            for ch in data.get("chapters", []):
+                chapters.append({
+                    "name": f"Capítulo {ch.get('chapter_number')}",
+                    "id": ch.get("id")
+                })
+
+            return chapters
+
+        except Exception:
+            return []
 
     # ================= PAGES =================
 
-    async def pages(self, chapter_id):
-        r = await self.client.get(
-            f"{API_URL}/api/chapter/{chapter_id}",
-            headers=self._headers()
-        )
+    async def pages(self, chapter_url):
+        try:
+            chapter_id = chapter_url.rstrip("/").split("/")[-1]
 
-        data = r.json()
+            r = await self.client.get(f"{API_URL}/chapter/{chapter_id}")
+            data = r.json()
 
-        pages = []
-        for page in data.get("pages", []):
-            if page.get("imageUrl"):
-                pages.append(CDN_URL + page["imageUrl"])
+            images = []
 
-        return pages
+            for p in data.get("pages", []):
+                if p.get("imageUrl"):
+                    images.append(CDN_URL + p["imageUrl"])
+
+            return images
+
+        except Exception:
+            return []
