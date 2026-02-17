@@ -1,37 +1,63 @@
-import httpx
+import aiohttp
 
-API_URL = "https://api.toonbr.com/api"
-CDN_URL = "https://cdn2.toonbr.com"
+class ToonBr:
+    name = "ToonBr"
+    base_url = "https://beta.toonbr.com"
+    api_url = "https://api.toonbr.com"
+    cdn_url = "https://cdn2.toonbr.com"
 
+    # ================= SEARCH =================
+    async def search(self, query: str):
+        url = f"{self.api_url}/api/manga?page=1&limit=20&search={query}"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
 
-class ToonBrSource:
-    def __init__(self):
-        self.client = httpx.AsyncClient(timeout=30)
+        results = []
+        for manga in data.get("data", []):
+            results.append({
+                "title": manga.get("title"),
+                "url": manga.get("slug"),  # importante!
+            })
 
-    async def search(self, query):
-        try:
-            r = await self.client.get(f"{API_URL}/manga", params={"search": query})
-            data = r.json()
-            return [{"title": m.get("title"), "slug": m.get("slug")} for m in data.get("data", [])]
-        except Exception:
-            return []
+        return results
 
-    async def chapters(self, manga_url):
-        slug = manga_url.rstrip("/").split("/")[-1]
-        r = await self.client.get(f"{API_URL}/manga/{slug}")
-        data = r.json()
+    # ================= CHAPTERS =================
+    async def chapters(self, manga_slug: str):
+        url = f"{self.api_url}/api/manga/{manga_slug}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+
         chapters = []
+        manga_title = data.get("title")
+
         for ch in data.get("chapters", []):
             chapters.append({
-                "name": f"Capítulo {ch.get('chapter_number')}",
-                "chapter_number": ch.get("chapter_number"),
-                "id": ch.get("id"),
-                "manga_title": data.get("title")
+                "name": ch.get("name"),
+                "chapter_number": ch.get("chapterNumber"),
+                "url": ch.get("id"),  # ID do capítulo
+                "manga_title": manga_title,
             })
+
+        # ordenar do mais recente pro mais antigo
+        chapters.sort(key=lambda x: float(x.get("chapter_number") or 0), reverse=True)
+
         return chapters
 
-    async def pages(self, chapter_url):
-        chapter_id = chapter_url.rstrip("/").split("/")[-1]
-        r = await self.client.get(f"{API_URL}/chapter/{chapter_id}")
-        data = r.json()
-        return [CDN_URL + p["imageUrl"] for p in data.get("pages", []) if p.get("imageUrl")]
+    # ================= PAGES =================
+    async def pages(self, chapter_id: str):
+        url = f"{self.api_url}/api/chapter/{chapter_id}"
+
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+
+        pages = []
+        for p in data.get("pages", []):
+            image = p.get("imageUrl")
+            if image:
+                pages.append(f"{self.cdn_url}{image}")
+
+        return pages
