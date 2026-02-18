@@ -1,6 +1,5 @@
 # sources/mangaflix.py
 import aiohttp
-import asyncio
 
 class MangaFlixSource:
     BASE_URL = "https://api.mangaflix.net/v1"
@@ -9,11 +8,10 @@ class MangaFlixSource:
         self.session = None
 
     async def _get_session(self):
-        if self.session is None:
+        if not self.session:
             self.session = aiohttp.ClientSession()
         return self.session
 
-    # ================= SEARCH =================
     async def search(self, query: str):
         session = await self._get_session()
         url = f"{self.BASE_URL}/search/mangas?query={query}&selected_language=pt-br"
@@ -30,7 +28,6 @@ class MangaFlixSource:
         except Exception:
             return []
 
-    # ================= CHAPTERS =================
     async def chapters(self, manga_id: str):
         session = await self._get_session()
         mid = manga_id.split("/")[-1]
@@ -49,7 +46,6 @@ class MangaFlixSource:
         except Exception:
             return []
 
-    # ================= PAGES =================
     async def pages(self, chapter_id: str):
         session = await self._get_session()
         cid = chapter_id.split("/")[-1]
@@ -57,8 +53,7 @@ class MangaFlixSource:
         try:
             async with session.get(url) as resp:
                 data = await resp.json()
-                images = [img.get("default_url") for img in data.get("data", {}).get("images", [])]
-                return images
+                return [img.get("default_url") for img in data.get("data", {}).get("images", [])]
         except Exception:
             return []
 
