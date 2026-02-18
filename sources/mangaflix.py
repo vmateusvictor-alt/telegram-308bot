@@ -6,16 +6,32 @@ class MangaFlix:
     base_url = "https://mangaflix.net"
     api_url = "https://api.mangaflix.net/v1"
 
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "Referer": "https://mangaflix.net/",
+        "Origin": "https://mangaflix.net",
+        "Accept": "application/json",
+    }
+
     # ================= SEARCH =================
     async def search(self, query: str):
-        url = f"{self.api_url}/search/mangas?query={query}&selected_language=pt-br"
-
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url)
+
+            # Primeira tentativa (sem filtro de idioma)
+            url = f"{self.api_url}/search/mangas?query={query}"
+            r = await client.get(url, headers=self.headers)
             r.raise_for_status()
             data = r.json()
 
+            # Se não encontrar nada, tenta com idioma PT-BR
+            if not data.get("data"):
+                url = f"{self.api_url}/search/mangas?query={query}&selected_language=pt-br"
+                r = await client.get(url, headers=self.headers)
+                r.raise_for_status()
+                data = r.json()
+
         results = []
+
         for manga in data.get("data", []):
             results.append({
                 "title": manga.get("name"),
@@ -29,7 +45,7 @@ class MangaFlix:
         url = f"{self.api_url}/mangas/{manga_id}"
 
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url)
+            r = await client.get(url, headers=self.headers)
             r.raise_for_status()
             data = r.json()
 
@@ -46,7 +62,7 @@ class MangaFlix:
                 "manga_title": manga_title,
             })
 
-        # Ordenação segura igual ToonBr
+        # Ordenação segura (igual ToonBr)
         def safe_float(x):
             try:
                 return float(x)
@@ -65,7 +81,7 @@ class MangaFlix:
         url = f"{self.api_url}/chapters/{chapter_id}?selected_language=pt-br"
 
         async with httpx.AsyncClient(timeout=30) as client:
-            r = await client.get(url)
+            r = await client.get(url, headers=self.headers)
             r.raise_for_status()
             data = r.json()
 
