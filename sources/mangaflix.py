@@ -114,4 +114,4 @@ class MangaFlixSource:
             img.get("default_url")
             for img in images
             if img.get("default_url")
-            ]
+        ]
