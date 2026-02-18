@@ -10,11 +10,17 @@ from telegram.ext import (
 )
 
 from sources.toonbr import ToonBr
+from sources.mangaflix import MangaFlix
 from utils.cbz import create_cbz
 
 logging.basicConfig(level=logging.INFO)
 
-source = ToonBr()
+# ================= FONTES =================
+SOURCES = {
+    "ToonBr": ToonBr(),
+    "MangaFlix": MangaFlix(),
+}
+
 CHAPTERS_PER_PAGE = 10
 
 
@@ -37,23 +43,29 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
         return await update.message.reply_text("Use: /buscar nome")
 
-    query = " ".join(context.args)
-    results = await source.search(query)
-
-    if not results:
-        return await update.message.reply_text("Nenhum resultado encontrado.")
+    query_text = " ".join(context.args)
 
     buttons = []
-    for manga in results[:10]:
-        buttons.append([
-            InlineKeyboardButton(
-                manga["title"],
-                callback_data=f"m|{manga['url']}|0"
-            )
-        ])
+
+    for source_name, source in SOURCES.items():
+        try:
+            results = await source.search(query_text)
+
+            for manga in results[:5]:
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"[{source_name}] {manga['title']}",
+                        callback_data=f"m|{source_name}|{manga['url']}|0"
+                    )
+                ])
+        except Exception as e:
+            print(f"Erro na fonte {source_name}: {e}")
+
+    if not buttons:
+        return await update.message.reply_text("Nenhum resultado encontrado.")
 
     await update.message.reply_text(
-        f"🔎 Resultados para: {query}",
+        f"🔎 Resultados para: {query_text}",
         reply_markup=InlineKeyboardMarkup(buttons)
     )
 
@@ -63,14 +75,18 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
 
-    _, slug, page_str = query.data.split("|")
+    _, source_name, slug, page_str = query.data.split("|")
     page = int(page_str)
+
+    source = SOURCES.get(source_name)
+    if not source:
+        return await query.message.reply_text("Fonte inválida.")
 
     chapters = await source.chapters(slug)
 
-    # salva na sessão do usuário
     context.user_data["chapters"] = chapters
     context.user_data["slug"] = slug
+    context.user_data["source_name"] = source_name
 
     total = len(chapters)
     start = page * CHAPTERS_PER_PAGE
@@ -88,15 +104,14 @@ async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         ])
 
-    # navegação
     nav = []
     if start > 0:
         nav.append(
-            InlineKeyboardButton("«", callback_data=f"m|{slug}|{page-1}")
+            InlineKeyboardButton("«", callback_data=f"m|{source_name}|{slug}|{page-1}")
         )
     if end < total:
         nav.append(
-            InlineKeyboardButton("»", callback_data=f"m|{slug}|{page+1}")
+            InlineKeyboardButton("»", callback_data=f"m|{source_name}|{slug}|{page+1}")
         )
     if nav:
         buttons.append(nav)
@@ -138,10 +153,12 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chapters = context.user_data.get("chapters")
     index = context.user_data.get("selected_index")
+    source_name = context.user_data.get("source_name")
 
-    if chapters is None or index is None:
-        await query.message.reply_text("❌ Sessão expirada. Busque novamente.")
-        return
+    if not chapters or index is None or not source_name:
+        return await query.message.reply_text("❌ Sessão expirada. Busque novamente.")
+
+    source = SOURCES.get(source_name)
 
     if mode == "single":
         selected = [chapters[index]]
@@ -171,10 +188,11 @@ async def download_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"Cap {chapter.get('chapter_number')}"
         )
 
-        await query.message.reply_document(
-            document=open(cbz_path, "rb"),
-            filename=cbz_name
-        )
+        with open(cbz_path, "rb") as f:
+            await query.message.reply_document(
+                document=f,
+                filename=cbz_name
+            )
 
         os.remove(cbz_path)
 
