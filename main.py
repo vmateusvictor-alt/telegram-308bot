@@ -54,7 +54,7 @@ async def ensure_owner(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # ================= START =================
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if block_private(update):
-        return await update.effective_message.reply_text("❌ Use o bot em grupos.")
+        return await update.effective_message.reply_text("❌ Bot criado especialmente para o grupo @animesmangas308! Bot criado por @shadow404c.")
     await update.effective_message.reply_text("📚 Manga Bot Online!\nUse:\n/buscar nome_do_manga")
 
 
