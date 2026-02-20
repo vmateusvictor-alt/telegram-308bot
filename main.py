@@ -8,8 +8,7 @@ from telegram.ext import (
     ApplicationBuilder, CommandHandler, CallbackQueryHandler,
     ContextTypes, MessageHandler, filters, ConversationHandler
 )
-
-from telegram.error import TelegramError, NetworkError, TimedOut
+from telegram.error import TelegramError
 
 from utils.loader import get_all_sources
 from utils.cbz import create_cbz
@@ -27,29 +26,23 @@ WAITING_ORDER = 2
 queue = deque()
 running = set()
 
-# ================= SAFE TELEGRAM =================
+# ================= SAFE SEND =================
 async def safe_send(bot, chat_id, text=None, file=None):
     try:
         if file:
-            await bot.send_document(chat_id, file, read_timeout=120, write_timeout=120)
+            await bot.send_document(chat_id, file)
         else:
-            await bot.send_message(chat_id, text, read_timeout=120, write_timeout=120)
-    except (TelegramError, NetworkError, TimedOut) as e:
-        logger.warning(f"IGNORADO TELEGRAM ERROR: {e}")
-    except Exception as e:
-        logger.warning(f"OUTRO ERRO: {e}")
+            await bot.send_message(chat_id, text)
+    except TelegramError as e:
+        logger.warning(f"Erro telegram ignorado: {e}")
 
-# ================= DOWNLOAD AUTO DETECT =================
-async def download_wrapper(manga, cap):
+# ================= DOWNLOAD WRAPPER =================
+async def download_wrapper(source, chapter):
     for name in ("download_chapter", "download_cap", "download", "get_chapter"):
         fn = getattr(dl, name, None)
         if fn:
-            return await fn(manga, cap)
-    raise Exception("Downloader inválido")
-
-# ================= ERROR HANDLER =================
-async def error_handler(update, context):
-    logger.error(f"ERRO GLOBAL: {context.error}")
+            return await asyncio.to_thread(fn, source, chapter)
+    raise Exception("Função de download não encontrada")
 
 # ================= GROUP ONLY =================
 def group_only(func):
@@ -65,25 +58,55 @@ def uname(user):
 # ================= START =================
 @group_only
 async def yuki(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Yuki online 🌸")
+    await update.message.reply_text("Yuki pronta 🌸 Use /search nome_do_manga")
 
-# ================= SEARCH =================
+# ================= SEARCH (CORRIGIDO) =================
 @group_only
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = " ".join(context.args)
-    if not name:
-        return await update.message.reply_text("Use /search nome")
 
-    results = await get_all_sources(name)
+    if not name:
+        return await update.message.reply_text("Use /search nome_do_manga")
+
+    msg = await update.message.reply_text("🔎 Procurando...")
+
+    sources = get_all_sources()
+    results = []
+
+    for source_name, source in sources.items():
+        try:
+            mangas = await asyncio.to_thread(source.search, name)
+
+            for manga in mangas:
+                try:
+                    chapters = await asyncio.to_thread(source.chapters, manga["url"])
+                    manga["chapters"] = chapters
+                    manga["source"] = source
+                    results.append(manga)
+                except Exception as e:
+                    logger.warning(f"Erro capítulos {source_name}: {e}")
+
+        except Exception as e:
+            logger.warning(f"Erro busca {source_name}: {e}")
+
     if not results:
-        return await update.message.reply_text("Nada encontrado")
+        return await msg.edit_text("❌ Nenhum resultado encontrado")
 
     context.user_data["results"] = results
 
-    kb = [[InlineKeyboardButton(r["title"], callback_data=f"s|{update.effective_user.id}|{i}")]
-          for i, r in enumerate(results)]
+    kb = []
+    for i, r in enumerate(results[:20]):
+        kb.append([
+            InlineKeyboardButton(
+                r["title"],
+                callback_data=f"s|{update.effective_user.id}|{i}"
+            )
+        ])
 
-    await update.message.reply_text("Escolha:", reply_markup=InlineKeyboardMarkup(kb))
+    await msg.edit_text(
+        f"Resultados encontrados: {len(results)}",
+        reply_markup=InlineKeyboardMarkup(kb)
+    )
 
 # ================= SELECT =================
 async def select(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -131,19 +154,23 @@ async def order_receive(update, context):
 # ================= QUEUE =================
 async def enqueue(user, chat, context, order, mode="all"):
     manga = context.user_data["manga"]
+    source = manga["source"]
 
     if mode == "one":
-        caps = [manga["chapters"][0]["number"]]
+        caps = [manga["chapters"][0]]
     else:
-        caps = [c["number"] for c in manga["chapters"]]
+        caps = manga["chapters"]
+
+    if "until" in context.user_data:
+        end = context.user_data["until"]
+        caps = [c for c in caps if int(c["number"]) <= end]
 
     if order == "desc":
         caps.reverse()
 
-    queue.append({"user": user, "chat": chat, "manga": manga, "caps": caps})
+    queue.append({"user": user, "chat": chat, "manga": manga, "caps": caps, "source": source})
 
     await safe_send(context.bot, chat, f"{uname(user)} entrou na fila")
-
     asyncio.create_task(process_queue(context.application))
 
 # ================= PROCESS =================
@@ -163,14 +190,18 @@ async def process_queue(app):
 
 # ================= DOWNLOAD =================
 async def run_download(bot, req):
-    user, chat, manga, caps = req.values()
+    user = req["user"]
+    chat = req["chat"]
+    manga = req["manga"]
+    source = req["source"]
+    caps = req["caps"]
 
     await safe_send(bot, chat, f"{uname(user)} - {manga['title']} iniciado")
 
     for cap in caps:
         try:
-            path = await download_wrapper(manga, cap)
-            cbz = await create_cbz(path)
+            path = await download_wrapper(source, cap)
+            cbz = await asyncio.to_thread(create_cbz, path)
 
             await safe_send(bot, chat, file=cbz)
 
@@ -186,15 +217,7 @@ async def run_download(bot, req):
 
 # ================= MAIN =================
 def main():
-    app = (
-        ApplicationBuilder()
-        .token(TOKEN)
-        .connect_timeout(60)
-        .read_timeout(60)
-        .write_timeout(60)
-        .pool_timeout(60)
-        .build()
-    )
+    app = ApplicationBuilder().token(TOKEN).build()
 
     conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(until, pattern="until")],
@@ -210,9 +233,6 @@ def main():
     app.add_handler(CallbackQueryHandler(select, pattern="^s\\|"))
     app.add_handler(conv)
 
-    app.add_error_handler(error_handler)
-
-    logger.info("BOT INICIANDO...")
     app.run_polling(drop_pending_updates=True)
 
 if __name__ == "__main__":
