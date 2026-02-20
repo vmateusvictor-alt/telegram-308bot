@@ -2,6 +2,7 @@ import asyncio
 import os
 import logging
 from collections import deque
+from inspect import iscoroutinefunction
 
 from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
@@ -34,13 +35,15 @@ async def safe_send(bot, chat_id, text=None, file=None):
         else:
             await bot.send_message(chat_id, text)
     except TelegramError as e:
-        logger.warning(f"Erro telegram ignorado: {e}")
+        logger.warning(f"Telegram erro ignorado: {e}")
 
 # ================= DOWNLOAD WRAPPER =================
 async def download_wrapper(source, chapter):
     for name in ("download_chapter", "download_cap", "download", "get_chapter"):
         fn = getattr(dl, name, None)
         if fn:
+            if iscoroutinefunction(fn):
+                return await fn(source, chapter)
             return await asyncio.to_thread(fn, source, chapter)
     raise Exception("Função de download não encontrada")
 
@@ -60,11 +63,10 @@ def uname(user):
 async def yuki(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Yuki pronta 🌸 Use /search nome_do_manga")
 
-# ================= SEARCH (CORRIGIDO) =================
+# ================= SEARCH =================
 @group_only
 async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = " ".join(context.args)
-
     if not name:
         return await update.message.reply_text("Use /search nome_do_manga")
 
@@ -75,14 +77,24 @@ async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     for source_name, source in sources.items():
         try:
-            mangas = await asyncio.to_thread(source.search, name)
+            # SEARCH
+            if iscoroutinefunction(source.search):
+                mangas = await source.search(name)
+            else:
+                mangas = await asyncio.to_thread(source.search, name)
 
             for manga in mangas:
                 try:
-                    chapters = await asyncio.to_thread(source.chapters, manga["url"])
+                    # CHAPTERS
+                    if iscoroutinefunction(source.chapters):
+                        chapters = await source.chapters(manga["url"])
+                    else:
+                        chapters = await asyncio.to_thread(source.chapters, manga["url"])
+
                     manga["chapters"] = chapters
                     manga["source"] = source
                     results.append(manga)
+
                 except Exception as e:
                     logger.warning(f"Erro capítulos {source_name}: {e}")
 
@@ -136,6 +148,7 @@ async def until(update, context):
 
 async def cap_receive(update, context):
     context.user_data["until"] = int(update.message.text)
+
     await update.message.reply_text(
         "Ordem?",
         reply_markup=InlineKeyboardMarkup([
@@ -152,23 +165,26 @@ async def order_receive(update, context):
     return ConversationHandler.END
 
 # ================= QUEUE =================
-async def enqueue(user, chat, context, order, mode="all"):
+async def enqueue(user, chat, context, order):
     manga = context.user_data["manga"]
     source = manga["source"]
 
-    if mode == "one":
-        caps = [manga["chapters"][0]]
-    else:
-        caps = manga["chapters"]
+    caps = manga["chapters"]
 
     if "until" in context.user_data:
         end = context.user_data["until"]
-        caps = [c for c in caps if int(c["number"]) <= end]
+        caps = [c for c in caps if int(c.get("chapter_number", 0)) <= end]
 
     if order == "desc":
-        caps.reverse()
+        caps = list(reversed(caps))
 
-    queue.append({"user": user, "chat": chat, "manga": manga, "caps": caps, "source": source})
+    queue.append({
+        "user": user,
+        "chat": chat,
+        "manga": manga,
+        "caps": caps,
+        "source": source
+    })
 
     await safe_send(context.bot, chat, f"{uname(user)} entrou na fila")
     asyncio.create_task(process_queue(context.application))
@@ -211,7 +227,7 @@ async def run_download(bot, req):
                 pass
 
         except Exception as e:
-            logger.warning(f"Erro cap {cap}: {e}")
+            logger.warning(f"Erro capítulo: {e}")
 
     await safe_send(bot, chat, f"{uname(user)} - {manga['title']} concluído")
 
