@@ -129,4 +129,3 @@ class MangaFlixSource:
                 pages.append(f"{cdn}/{path}")
 
         return pages
-                ]
