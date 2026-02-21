@@ -1,288 +1,242 @@
-import asyncio
 import os
 import logging
-from collections import deque
-from inspect import iscoroutinefunction
+import asyncio
 
-from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, CallbackQueryHandler,
-    ContextTypes, MessageHandler, filters, ConversationHandler
+    ApplicationBuilder,
+    CommandHandler,
+    CallbackQueryHandler,
+    ContextTypes,
+    ConversationHandler,
+    MessageHandler,
+    filters,
 )
-from telegram.error import TelegramError
 
 from utils.loader import get_all_sources
 from utils.cbz import create_cbz
-import utils.downloader as dl
 
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("YUKI")
 
-TOKEN = os.getenv("BOT_TOKEN")
+CHAPTERS_PER_PAGE = 10
+WAITING_FOR_CAP = 1
+MAX_CHAPTERS_PER_REQUEST = 50
 
-MAX_SIMULTANEOUS_DOWNLOADS = 2
-WAITING_CAP = 1
-WAITING_ORDER = 2
+# ================= FILA GLOBAL =================
+download_queue = asyncio.Queue()
+current_download = None
 
-queue = deque()
-running = set()
+# ================= SESSÕES =================
+def get_sessions(context):
+    if "sessions" not in context.chat_data:
+        context.chat_data["sessions"] = {}
+    return context.chat_data["sessions"]
 
+def get_session(context, message_id):
+    return get_sessions(context).setdefault(str(message_id), {})
 
-# ---------------- SAFE SEND ----------------
-async def safe_send(bot, chat_id, text=None, file=None):
-    try:
-        if file:
-            await bot.send_document(chat_id, file)
-        else:
-            await bot.send_message(chat_id, text)
-    except TelegramError as e:
-        logger.warning(f"Telegram error ignorado: {e}")
+def block_private(update: Update):
+    return update.effective_chat.type == "private"
 
+# ================= WORKER =================
+async def download_worker():
+    global current_download
 
-# ---------------- DOWNLOAD WRAPPER ----------------
-async def download_wrapper(source, chapter):
-    for name in ("download_chapter", "download_cap", "download", "get_chapter"):
-        fn = getattr(dl, name, None)
-        if fn:
-            if iscoroutinefunction(fn):
-                return await fn(source, chapter)
-            return await asyncio.to_thread(fn, source, chapter)
-    raise Exception("Função de download não encontrada")
+    while True:
+        job = await download_queue.get()
+        current_download = job
 
+        message = job["message"]
+        source = job["source"]
+        chapters = job["chapters"]
+        user = job["user"]
 
-# ---------------- GROUP ONLY ----------------
-def group_only(func):
-    async def wrapper(update: Update, context: ContextTypes.DEFAULT_TYPE):
-        if update.effective_chat.type not in ["group", "supergroup"]:
-            return
-        return await func(update, context)
-    return wrapper
+        total = len(chapters)
+        sent = 0
 
+        status_msg = await message.reply_text(
+            f"📥 Download iniciado para {user}\n"
+            f"Total: {total} capítulos"
+        )
 
-def uname(user):
-    return user.first_name
+        for chapter in chapters:
+            try:
+                await send_chapter(message, source, chapter)
+                sent += 1
 
+                await status_msg.edit_text(
+                    f"📥 Baixando para {user}\n"
+                    f"Progresso: {sent}/{total}"
+                )
 
-# ---------------- START ----------------
-@group_only
-async def yuki(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("🌸 Yuki pronta — use /search nome_do_manga")
+            except Exception as e:
+                print(f"Erro no capítulo: {e}")
 
+        await status_msg.edit_text("✅ Download finalizado.")
+        current_download = None
+        download_queue.task_done()
 
-# ---------------- SEARCH ----------------
-@group_only
-async def search(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    name = " ".join(context.args)
-    if not name:
-        return await update.message.reply_text("Use /search nome_do_manga")
+# ================= COMANDO YUKI =================
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if block_private(update):
+        return await update.effective_message.reply_text(
+            "❌ Bot disponível apenas no grupo."
+        )
 
-    msg = await update.message.reply_text("🔎 Procurando...")
+    await update.effective_message.reply_text(
+        "🌸 Yuki Manga Bot Online!\n\nUse:\n/search nome_do_manga"
+    )
 
+# ================= STATUS =================
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = "📊 Status da Fila\n\n"
+
+    if current_download:
+        text += f"🔄 Em andamento: {current_download['user']}\n"
+        text += f"Capítulos: {len(current_download['chapters'])}\n\n"
+    else:
+        text += "🔄 Nenhum download em andamento\n\n"
+
+    text += f"📦 Na fila: {download_queue.qsize()}"
+
+    await update.message.reply_text(text)
+
+# ================= SEARCH =================
+async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if block_private(update):
+        return
+
+    if not context.args:
+        return await update.effective_message.reply_text(
+            "Use:\n/search nome_do_manga"
+        )
+
+    query_text = " ".join(context.args)
     sources = get_all_sources()
-    results = []
+    buttons = []
 
     for source_name, source in sources.items():
         try:
-            if iscoroutinefunction(source.search):
-                mangas = await source.search(name)
-            else:
-                mangas = await asyncio.to_thread(source.search, name)
+            results = await source.search(query_text)
+            for manga in results[:6]:
+                title = manga.get("title")
+                url = manga.get("url")
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"{title} ({source_name})",
+                        callback_data=f"m|{source_name}|{url}|0"
+                    )
+                ])
+        except Exception:
+            continue
 
-            for manga in mangas:
-                manga["source"] = source
-                results.append(manga)
+    if not buttons:
+        return await update.effective_message.reply_text(
+            "❌ Nenhum resultado encontrado."
+        )
 
-        except Exception as e:
-            logger.warning(f"Erro busca {source_name}: {e}")
-
-    if not results:
-        return await msg.edit_text("❌ Nenhum resultado encontrado")
-
-    context.user_data["results"] = results
-
-    kb = []
-    for i, r in enumerate(results[:20]):
-        kb.append([
-            InlineKeyboardButton(
-                r["title"],
-                callback_data=f"s|{update.effective_user.id}|{i}"
-            )
-        ])
-
-    await msg.edit_text(
-        f"Resultados encontrados: {len(results)}",
-        reply_markup=InlineKeyboardMarkup(kb)
+    msg = await update.effective_message.reply_text(
+        f"🔎 Resultados para: {query_text}",
+        reply_markup=InlineKeyboardMarkup(buttons),
     )
 
+    session = get_session(context, msg.message_id)
+    session["owner_id"] = update.effective_user.id
 
-# ---------------- SELECT MANGA ----------------
-async def select(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
+# ================= LISTAR CAPÍTULOS =================
+async def manga_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-    _, uid, idx = q.data.split("|")
-    if int(uid) != q.from_user.id:
-        return
+    _, source_name, manga_id, page_str = query.data.split("|")
+    page = int(page_str)
 
-    manga = context.user_data["results"][int(idx)]
-    context.user_data["manga"] = manga
+    source = get_all_sources()[source_name]
+    chapters = await source.chapters(manga_id)
 
-    kb = [
-        [InlineKeyboardButton("📄 Baixar este", callback_data="one")],
-        [InlineKeyboardButton("📚 Baixar todos", callback_data="all")],
-        [InlineKeyboardButton("🔢 Baixar até X", callback_data="until")]
-    ]
+    session = get_session(context, query.message.message_id)
+    session["chapters"] = chapters
+    session["source_name"] = source_name
 
-    await q.edit_message_text(manga["title"], reply_markup=InlineKeyboardMarkup(kb))
+    total = len(chapters)
+    start = page * CHAPTERS_PER_PAGE
+    end = start + CHAPTERS_PER_PAGE
+    subset = chapters[start:end]
 
-
-# ---------------- DOWNLOAD OPTIONS ----------------
-async def option_buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-
-    if "manga" not in context.user_data:
-        return
-
-    context.user_data["mode"] = q.data
-
-    if q.data == "until":
-        await q.message.reply_text("Digite o capítulo final:")
-        return WAITING_CAP
-
-    await q.message.reply_text(
-        "Escolha a ordem:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬆ Crescente", callback_data="asc")],
-            [InlineKeyboardButton("⬇ Decrescente", callback_data="desc")]
+    buttons = []
+    for i, ch in enumerate(subset, start=start):
+        num = ch.get("chapter_number") or ch.get("name")
+        buttons.append([
+            InlineKeyboardButton(f"Cap {num}", callback_data=f"c|{i}")
         ])
+
+    await query.edit_message_text(
+        "📖 Selecione o capítulo:",
+        reply_markup=InlineKeyboardMarkup(buttons)
     )
-    return WAITING_ORDER
 
+# ================= DOWNLOAD =================
+async def chapter_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
 
-# ---------------- RECEIVE CAP ----------------
-async def cap_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    try:
-        context.user_data["until"] = int(update.message.text)
-    except:
-        await update.message.reply_text("Número inválido")
-        return WAITING_CAP
+    session = get_session(context, query.message.message_id)
+    _, index_str = query.data.split("|")
 
-    await update.message.reply_text(
-        "Escolha a ordem:",
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("⬆ Crescente", callback_data="asc")],
-            [InlineKeyboardButton("⬇ Decrescente", callback_data="desc")]
-        ])
-    )
-    return WAITING_ORDER
+    index = int(index_str)
+    chapters = session["chapters"]
+    source_name = session["source_name"]
 
+    selected = chapters[index:]
 
-# ---------------- ORDER ----------------
-async def order_receive(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
+    if len(selected) > MAX_CHAPTERS_PER_REQUEST:
+        selected = selected[:MAX_CHAPTERS_PER_REQUEST]
 
-    await enqueue(q.from_user, q.message.chat_id, context, q.data)
-    return ConversationHandler.END
-
-
-# ---------------- QUEUE ----------------
-async def enqueue(user, chat, context, order):
-    manga = context.user_data["manga"]
-    source = manga["source"]
-
-    if iscoroutinefunction(source.chapters):
-        caps = await source.chapters(manga["url"])
-    else:
-        caps = await asyncio.to_thread(source.chapters, manga["url"])
-
-    mode = context.user_data.get("mode")
-
-    if mode == "one":
-        caps = caps[:1]
-
-    if mode == "until":
-        end = context.user_data["until"]
-        caps = [c for c in caps if int(c.get("chapter_number", 0)) <= end]
-
-    if order == "desc":
-        caps = list(reversed(caps))
-
-    queue.append({
-        "user": user,
-        "chat": chat,
-        "manga": manga,
-        "caps": caps,
-        "source": source
+    await download_queue.put({
+        "message": query.message,
+        "source": get_all_sources()[source_name],
+        "chapters": selected,
+        "user": query.from_user.first_name
     })
 
-    await safe_send(context.bot, chat, f"{uname(user)} entrou na fila")
-    asyncio.create_task(process_queue(context.application))
-
-
-# ---------------- PROCESS ----------------
-async def process_queue(app):
-    while len(running) < MAX_SIMULTANEOUS_DOWNLOADS and queue:
-        req = queue.popleft()
-        task = app.create_task(run_download(app.bot, req))
-        running.add(task)
-
-        def done(_):
-            running.remove(task)
-            app.create_task(process_queue(app))
-
-        task.add_done_callback(done)
-
-
-# ---------------- DOWNLOAD ----------------
-async def run_download(bot, req):
-    user = req["user"]
-    chat = req["chat"]
-    manga = req["manga"]
-    source = req["source"]
-    caps = req["caps"]
-
-    await safe_send(bot, chat, f"📥 {uname(user)} - {manga['title']} iniciado")
-
-    for cap in caps:
-        try:
-            path = await download_wrapper(source, cap)
-            cbz = await asyncio.to_thread(create_cbz, path)
-
-            await safe_send(bot, chat, file=cbz)
-
-            try:
-                os.remove(cbz)
-            except:
-                pass
-
-        except Exception as e:
-            logger.warning(f"Erro capítulo: {e}")
-
-    await safe_send(bot, chat, f"✅ {uname(user)} - {manga['title']} concluído")
-
-
-# ---------------- MAIN ----------------
-def main():
-    app = ApplicationBuilder().token(TOKEN).build()
-
-    conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(option_buttons, pattern="^(one|all|until)$")],
-        states={
-            WAITING_CAP: [MessageHandler(filters.TEXT & ~filters.COMMAND, cap_receive)],
-            WAITING_ORDER: [CallbackQueryHandler(order_receive, pattern="^(asc|desc)$")]
-        },
-        fallbacks=[]
+    await query.message.reply_text(
+        f"📌 Adicionado à fila.\n"
+        f"Capítulos: {len(selected)}"
     )
 
-    app.add_handler(CommandHandler("Yuki", yuki))
-    app.add_handler(CommandHandler("search", search))
-    app.add_handler(CallbackQueryHandler(select, pattern="^s\\|"))
-    app.add_handler(conv)
+# ================= ENVIAR CAP =================
+async def send_chapter(message, source, chapter):
+    cid = chapter.get("url")
+    num = chapter.get("chapter_number")
+    manga_title = chapter.get("manga_title", "Manga")
+
+    imgs = await source.pages(cid)
+    if not imgs:
+        return
+
+    cbz_path, cbz_name = await create_cbz(imgs, manga_title, f"Cap_{num}")
+
+    await message.reply_document(
+        document=open(cbz_path, "rb"),
+        filename=cbz_name
+    )
+
+    os.remove(cbz_path)
+
+# ================= MAIN =================
+def main():
+    app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
+
+    app.add_handler(CommandHandler("Yuki", start))
+    app.add_handler(CommandHandler("search", buscar))
+    app.add_handler(CommandHandler("status", status))
+
+    app.add_handler(CallbackQueryHandler(manga_callback, pattern="^m\\|"))
+    app.add_handler(CallbackQueryHandler(chapter_callback, pattern="^c\\|"))
+
+    app.create_task(download_worker())
 
     app.run_polling(drop_pending_updates=True)
-
 
 if __name__ == "__main__":
     main()
