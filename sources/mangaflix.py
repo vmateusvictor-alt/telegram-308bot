@@ -7,7 +7,7 @@ class MangaFlixSource:
     api_url = "https://api.mangaflix.net/v1"
 
     headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+        "User-Agent": "Mozilla/5.0",
         "Accept": "application/json, text/plain, */*",
         "Accept-Language": "pt-BR,pt;q=0.9",
         "Origin": base_url,
@@ -32,7 +32,7 @@ class MangaFlixSource:
         async with httpx.AsyncClient(
             headers=self.headers,
             timeout=self.timeout,
-            http2=False  # força HTTP/1.1
+            http2=False
         ) as client:
 
             r = await client.get(url, params=params)
@@ -55,7 +55,14 @@ class MangaFlixSource:
 
     # ================= CHAPTERS =================
     async def chapters(self, manga_id: str):
-        url = f"{self.api_url}/mangas/{manga_id}"
+        url = f"{self.api_url}/mangas/{manga_id}/chapters"
+
+        params = {
+            "selected_language": "pt-br",
+            "page": 1
+        }
+
+        chapters = []
 
         async with httpx.AsyncClient(
             headers=self.headers,
@@ -63,26 +70,27 @@ class MangaFlixSource:
             http2=False
         ) as client:
 
-            r = await client.get(url)
+            while True:
+                r = await client.get(url, params=params)
 
-            if r.status_code != 200:
-                print("Chapters error:", r.status_code, r.text)
-                return []
+                if r.status_code != 200:
+                    print("Chapters error:", r.status_code, r.text)
+                    break
 
-            data = r.json()
+                data = r.json()
+                data_list = data.get("data", [])
 
-        manga_data = data.get("data", {})
-        manga_title = manga_data.get("name", "Manga")
+                if not data_list:
+                    break
 
-        chapters = []
+                for chapter in data_list:
+                    chapters.append({
+                        "name": f"Capítulo {chapter.get('number')}",
+                        "chapter_number": chapter.get("number"),
+                        "url": chapter.get("_id")
+                    })
 
-        for chapter in manga_data.get("chapters", []):
-            chapters.append({
-                "name": f"Capítulo {chapter.get('number')}",
-                "chapter_number": chapter.get("number"),
-                "url": chapter.get("_id"),
-                "manga_title": manga_title
-            })
+                params["page"] += 1
 
         return chapters
 
@@ -110,16 +118,18 @@ class MangaFlixSource:
 
         chapter_data = data.get("data", {})
 
-        cdn = chapter_data.get("cdn")
+        # Alguns capítulos trazem CDN separado
+        cdn = chapter_data.get("cdn") or "https://cdn.mangaflix.net"
         images = chapter_data.get("images", [])
 
-        if not cdn or not images:
+        if not images:
             return []
 
         pages = []
 
         for img in images:
             path = img.get("path") or img.get("url") or img.get("image")
+
             if not path:
                 continue
 
