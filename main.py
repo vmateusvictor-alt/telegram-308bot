@@ -22,12 +22,11 @@ from utils.queue_manager import (
 
 logging.basicConfig(level=logging.INFO)
 
-# evita estourar RAM
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
 
 
 # =====================================================
-# ENVIO DO CAPÍTULO (SEM SALVAR NO DISCO)
+# ENVIO DO CAPÍTULO
 # =====================================================
 async def send_chapter(message, source, chapter):
 
@@ -58,11 +57,9 @@ async def send_chapter(message, source, chapter):
 
                 except RetryAfter as e:
                     wait_time = int(e.retry_after) + 2
-                    print(f"FloodWait — aguardando {wait_time}s")
                     await asyncio.sleep(wait_time)
 
                 except (TimedOut, NetworkError):
-                    print("Erro de rede — tentando novamente...")
                     await asyncio.sleep(5)
 
         except Exception as e:
@@ -76,7 +73,7 @@ async def send_chapter(message, source, chapter):
 
 
 # =====================================================
-# WORKER (PROCESSADOR DA FILA)
+# WORKER
 # =====================================================
 async def download_worker():
 
@@ -92,7 +89,6 @@ async def download_worker():
                 job["chapter"],
             )
 
-            # pausa anti-flood
             await asyncio.sleep(2)
 
         except Exception as e:
@@ -103,7 +99,7 @@ async def download_worker():
 
 
 # =====================================================
-# COMANDO BUSCAR
+# BUSCAR
 # =====================================================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -115,11 +111,8 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query_text = " ".join(context.args)
     sources = get_all_sources()
 
-    await update.message.reply_text(f"🔎 Buscando: {query_text}")
+    await update.message.reply_text(f"🔎 Buscando «{query_text}»")
 
-    total_added = 0
-
-    # tenta todas as fontes
     for source_name, source in sources.items():
         try:
             results = await source.search(query_text)
@@ -127,42 +120,145 @@ async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
             if not results:
                 continue
 
-            # pega até 3 resultados para evitar fila gigante acidental
-            for manga in results[:3]:
+            manga = results[0]
 
-                title = manga.get("title")
-                url = manga.get("url")
+            title = manga.get("title")
+            url = manga.get("url")
+            cover = manga.get("cover")
+            status = manga.get("status", "Desconhecido")
+            genres = manga.get("genres", "Não informado")
+            synopsis = manga.get("synopsis", "Sem descrição.")
 
-                chapters = await source.chapters(url)
+            chapters = await source.chapters(url)
 
-                for ch in chapters:
-                    await add_job({
-                        "message": update.message,
-                        "source": source,
-                        "chapter": ch,
-                        "meta": {
-                            "title": title,
-                            "chapter": ch.get("chapter_number"),
-                        }
-                    })
+            if not chapters:
+                return await update.message.reply_text(
+                    "❌ Nenhum capítulo encontrado."
+                )
 
-                total_added += len(chapters)
+            context.user_data["chapters"] = chapters
+            context.user_data["source"] = source
+            context.user_data["title"] = title
+
+            caption = f"""📚 «{title}»
+
+Status » {status}
+Gênero: {genres}
+
+Sinopse:
+{synopsis}
+
+🔗 @animesmangas308"""
+
+            if cover:
+                await update.message.reply_photo(
+                    photo=cover,
+                    caption=caption
+                )
+            else:
+                await update.message.reply_text(caption)
+
+            return await update.message.reply_text(
+                """Escolha uma opção:
+
+/baixareste
+/baixartodos
+/baixarate NUMERO"""
+            )
 
         except Exception as e:
             print(f"Erro na fonte {source_name}:", e)
 
-    if total_added == 0:
+    await update.message.reply_text("❌ Nenhum resultado encontrado.")
+
+
+# =====================================================
+# BAIXAR ESTE
+# =====================================================
+async def baixar_este(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    chapters = context.user_data.get("chapters")
+    source = context.user_data.get("source")
+
+    if not chapters:
+        return await update.message.reply_text("❌ Nenhum manga carregado.")
+
+    chapter = chapters[0]
+
+    await add_job({
+        "message": update.message,
+        "source": source,
+        "chapter": chapter,
+    })
+
+    await update.message.reply_text("✅ «Baixar este» adicionado na fila.")
+
+
+# =====================================================
+# BAIXAR TODOS
+# =====================================================
+async def baixar_todos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    chapters = context.user_data.get("chapters")
+    source = context.user_data.get("source")
+
+    if not chapters:
+        return await update.message.reply_text("❌ Nenhum manga carregado.")
+
+    for ch in chapters:
+        await add_job({
+            "message": update.message,
+            "source": source,
+            "chapter": ch,
+        })
+
+    await update.message.reply_text("✅ «Baixar todos» adicionados na fila.")
+
+
+# =====================================================
+# BAIXAR ATÉ
+# =====================================================
+async def baixar_ate(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
+    if not context.args:
         return await update.message.reply_text(
-            "❌ Nenhum resultado encontrado."
+            "Use: /baixarate NUMERO"
         )
 
+    try:
+        limite = float(context.args[0])
+    except:
+        return await update.message.reply_text("Número inválido.")
+
+    chapters = context.user_data.get("chapters")
+    source = context.user_data.get("source")
+
+    if not chapters:
+        return await update.message.reply_text("❌ Nenhum manga carregado.")
+
+    adicionados = 0
+
+    for ch in chapters:
+        try:
+            num = float(ch.get("chapter_number", 0))
+        except:
+            continue
+
+        if num <= limite:
+            await add_job({
+                "message": update.message,
+                "source": source,
+                "chapter": ch,
+            })
+            adicionados += 1
+
     await update.message.reply_text(
-        f"✅ {total_added} capítulos adicionados na fila."
+        f"✅ «Baixar até {limite}» adicionou {adicionados} capítulos."
     )
 
 
 # =====================================================
-# STATUS DA FILA
+# STATUS
 # =====================================================
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
@@ -171,7 +267,7 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 # =====================================================
-# CANCELAR DOWNLOADS
+# CANCELAR
 # =====================================================
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
@@ -195,10 +291,12 @@ def main():
     ).build()
 
     app.add_handler(CommandHandler("buscar", buscar))
+    app.add_handler(CommandHandler("baixareste", baixar_este))
+    app.add_handler(CommandHandler("baixartodos", baixar_todos))
+    app.add_handler(CommandHandler("baixarate", baixar_ate))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("cancelar", cancelar))
 
-    # inicia worker corretamente
     async def startup(app):
         asyncio.create_task(download_worker())
         print("✅ Worker iniciado")
