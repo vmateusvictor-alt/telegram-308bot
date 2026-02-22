@@ -22,10 +22,13 @@ from utils.queue_manager import (
 
 logging.basicConfig(level=logging.INFO)
 
+# limita downloads simultâneos (protege RAM)
 DOWNLOAD_SEMAPHORE = asyncio.Semaphore(2)
 
 
-# ================= SEND =================
+# =====================================================
+# ENVIO DO CAPÍTULO (SEM SALVAR NO DISCO)
+# =====================================================
 async def send_chapter(message, source, chapter):
 
     async with DOWNLOAD_SEMAPHORE:
@@ -34,35 +37,49 @@ async def send_chapter(message, source, chapter):
         num = chapter.get("chapter_number")
         manga_title = chapter.get("manga_title", "Manga")
 
-        imgs = await source.pages(cid)
-        if not imgs:
-            return
+        try:
+            imgs = await source.pages(cid)
+            if not imgs:
+                return
 
-        cbz_buffer, cbz_name = await create_cbz(
-            imgs,
-            manga_title,
-            f"Cap_{num}"
-        )
+            cbz_buffer, cbz_name = await create_cbz(
+                imgs,
+                manga_title,
+                f"Cap_{num}"
+            )
 
-        while True:
+            # retry automático Telegram
+            while True:
+                try:
+                    await message.reply_document(
+                        document=cbz_buffer,
+                        filename=cbz_name
+                    )
+                    break
+
+                except RetryAfter as e:
+                    wait_time = int(e.retry_after) + 2
+                    print(f"FloodWait — aguardando {wait_time}s")
+                    await asyncio.sleep(wait_time)
+
+                except (TimedOut, NetworkError):
+                    print("Erro de rede — tentando novamente...")
+                    await asyncio.sleep(5)
+
+        except Exception as e:
+            print(f"Erro capítulo {num}:", e)
+
+        finally:
             try:
-                await message.reply_document(
-                    document=cbz_buffer,
-                    filename=cbz_name
-                )
-                break
-
-            except RetryAfter as e:
-                await asyncio.sleep(int(e.retry_after) + 2)
-
-            except (TimedOut, NetworkError):
-                await asyncio.sleep(5)
-
-        cbz_buffer.close()
+                cbz_buffer.close()
+            except:
+                pass
 
 
-# ================= WORKER =================
-async def download_worker(app):
+# =====================================================
+# WORKER (CÉREBRO DO BOT)
+# =====================================================
+async def download_worker():
 
     print("✅ Worker Elite iniciado")
 
@@ -76,48 +93,61 @@ async def download_worker(app):
                 job["chapter"],
             )
 
+            # pausa anti-flood
             await asyncio.sleep(2)
 
         except Exception as e:
-            print("Erro worker:", e)
+            print("Erro no worker:", e)
 
         remove_job()
         DOWNLOAD_QUEUE.task_done()
 
 
-async def start_worker(app):
-    asyncio.create_task(download_worker(app))
-
-
-# ================= COMMANDS =================
+# =====================================================
+# COMANDOS
+# =====================================================
 async def buscar(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if not context.args:
-        return await update.message.reply_text("/buscar nome")
+        return await update.message.reply_text("Use: /buscar nome_do_manga")
 
     query = " ".join(context.args)
+    sources = get_all_sources()
 
-    source_name, source = list(get_all_sources().items())[0]
+    await update.message.reply_text("🔎 Procurando manga...")
 
-    mangas = await source.search(query)
+    # tenta todas fontes disponíveis
+    for source_name, source in sources.items():
+        try:
+            mangas = await source.search(query)
 
-    manga = mangas[0]
-    chapters = await source.chapters(manga["url"])
+            if not mangas:
+                continue
 
-    await update.message.reply_text(
-        f"📥 {len(chapters)} capítulos adicionados na fila."
-    )
+            manga = mangas[0]
+            chapters = await source.chapters(manga["url"])
 
-    for ch in chapters:
-        await add_job({
-            "message": update.message,
-            "source": source,
-            "chapter": ch,
-            "meta": {
-                "title": manga["title"],
-                "chapter": ch.get("chapter_number")
-            }
-        })
+            await update.message.reply_text(
+                f"📥 {len(chapters)} capítulos adicionados na fila."
+            )
+
+            for ch in chapters:
+                await add_job({
+                    "message": update.message,
+                    "source": source,
+                    "chapter": ch,
+                    "meta": {
+                        "title": manga["title"],
+                        "chapter": ch.get("chapter_number"),
+                    }
+                })
+
+            return
+
+        except Exception as e:
+            print("Fonte falhou:", e)
+
+    await update.message.reply_text("❌ Nenhuma fonte respondeu.")
 
 
 async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -127,25 +157,40 @@ async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def cancelar(update: Update, context: ContextTypes.DEFAULT_TYPE):
+
     while not DOWNLOAD_QUEUE.empty():
-        DOWNLOAD_QUEUE.get_nowait()
-        DOWNLOAD_QUEUE.task_done()
+        try:
+            DOWNLOAD_QUEUE.get_nowait()
+            DOWNLOAD_QUEUE.task_done()
+        except:
+            break
 
-    await update.message.reply_text("❌ Fila cancelada.")
+    await update.message.reply_text("❌ Downloads cancelados.")
 
 
-# ================= MAIN =================
+# =====================================================
+# MAIN
+# =====================================================
 def main():
 
-    app = ApplicationBuilder().token(os.getenv("BOT_TOKEN")).build()
+    app = ApplicationBuilder().token(
+        os.getenv("BOT_TOKEN")
+    ).build()
 
+    # comandos
     app.add_handler(CommandHandler("buscar", buscar))
     app.add_handler(CommandHandler("status", status))
     app.add_handler(CommandHandler("cancelar", cancelar))
 
-    app.post_init = start_worker
+    # inicia worker corretamente
+    async def startup(app):
+        asyncio.create_task(download_worker())
+        print("✅ Worker iniciado")
 
-    app.run_polling()
+    app.post_init = startup
+
+    print("🤖 Bot iniciado...")
+    app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
