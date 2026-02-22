@@ -20,7 +20,7 @@ from core.queue_manager import download_queue, current_job, worker
 logging.basicConfig(level=logging.INFO)
 
 CHAPTERS_PER_PAGE = 10
-WAITING_FOR_CAP = 1
+WAITING_FOR_CAP = 2
 MAX_CHAPTERS_PER_REQUEST = 300
 
 
