@@ -3,26 +3,35 @@ import re
 
 ANILIST_URL = "https://graphql.anilist.co"
 
-
-# remove html da sinopse
+# Remove HTML da sinopse
 def clean_html(text):
     return re.sub("<.*?>", "", text or "")
 
-
-# resumo simples automático
+# Resumo simples automático
 def summarize(text, max_sentences=3):
     sentences = text.split(". ")
-    return ". ".join(sentences[:max_sentences]).strip() + "."
+    if len(sentences) > max_sentences:
+        return ". ".join(sentences[:max_sentences]).strip() + "..."
+    return text.strip()
 
+# Formata a saída de forma bonita
+def format_manga_info(data):
+    return (
+        f"🎌 **{data['title']}**\n"
+        f"📚 Gêneros: {data['genres']}\n"
+        f"📝 Sinopse: {data['synopsis']}\n"
+        f"🖼️ Capa: {data['cover']}"
+    )
 
 async def search_anilist(title):
 
     query = """
     query ($search: String) {
-      Media(search: $search, type: MANGA) {
+      Media(search: $search, type: MANGA, language: PORTUGUESE) {
         title {
           romaji
           english
+          native
         }
         description(asHtml:false)
         genres
@@ -38,18 +47,22 @@ async def search_anilist(title):
             ANILIST_URL,
             json={"query": query, "variables": {"search": title}},
         ) as resp:
-
             data = await resp.json()
+
+    if not data.get("data") or not data["data"].get("Media"):
+        return "❌ Mangá não encontrado."
 
     media = data["data"]["Media"]
 
-    synopsis = clean_html(media["description"])
+    # Tenta pegar a sinopse em português, se existir
+    synopsis = clean_html(media.get("description"))
     synopsis = summarize(synopsis)
 
-    return {
-        "title": media["title"]["romaji"]
-        or media["title"]["english"],
-        "genres": ", ".join(media["genres"]),
-        "cover": media["coverImage"]["extraLarge"],
-        "synopsis": synopsis,
+    manga_info = {
+        "title": media["title"].get("romaji") or media["title"].get("english") or media["title"].get("native"),
+        "genres": ", ".join(media.get("genres", [])) or "Não disponível",
+        "cover": media["coverImage"].get("extraLarge"),
+        "synopsis": synopsis or "Sem sinopse disponível.",
     }
+
+    return format_manga_info(manga_info)
