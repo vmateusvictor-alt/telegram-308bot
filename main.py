@@ -23,9 +23,7 @@ from utils.queue_manager import (
     DOWNLOAD_QUEUE,
     add_job,
     remove_job,
-    queue_size,
 )
-from utils.anilist import search_anilist
 
 logging.basicConfig(level=logging.INFO)
 
